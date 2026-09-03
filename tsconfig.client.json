@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES5",
+    "module": "none",
+    "lib": ["DOM", "ES2015"],
+    "outFile": "dist/client/app.js",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "removeComments": true,
+    "skipLibCheck": true
+  },
+  "files": ["shared/display-state.d.ts", "client/app.ts"]
+}

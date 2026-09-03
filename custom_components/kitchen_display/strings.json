@@ -1,0 +1,19 @@
+{
+  "title": "Kitchen Display",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Kitchen Display",
+        "description": "Connect to the display on your local network.",
+        "data": {"base_url": "Display base URL", "token": "Bearer token", "timer_entity": "Timer helper"}
+      },
+      "reconfigure": {
+        "title": "Reconfigure Kitchen Display",
+        "data": {"base_url": "Display base URL", "token": "Bearer token", "timer_entity": "Timer helper"}
+      }
+    },
+    "error": {"cannot_connect": "Unable to connect", "invalid_auth": "The bearer token is invalid", "invalid_url": "Enter an HTTP or HTTPS URL", "invalid_timer": "Select an existing timer helper"},
+    "abort": {"single_instance_allowed": "Only one Kitchen Display can be configured", "reconfigure_successful": "Configuration updated"}
+  },
+  "entity": {"binary_sensor": {"availability": {"name": "Availability"}}}
+}

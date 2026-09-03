@@ -1,0 +1,32 @@
+show_text:
+  name: Show text
+  description: Show plain text on the kitchen display.
+  fields:
+    title: {name: Title, selector: {text: {}}}
+    text: {name: Text, required: true, selector: {text: {multiline: true}}}
+    timeout_seconds: {name: Timeout, selector: {number: {min: 0, max: 86400, mode: box}}}
+show_recipe:
+  name: Show recipe
+  description: Show a structured recipe.
+  fields:
+    title: {name: Title, required: true, selector: {text: {}}}
+    ingredients: {name: Ingredients, required: true, selector: {object: {}}}
+    steps: {name: Steps, required: true, selector: {object: {}}}
+    cooking_time_minutes: {name: Cooking time, selector: {number: {min: 1, max: 1440, mode: box}}}
+    timeout_seconds: {name: Timeout, selector: {number: {min: 0, max: 86400, mode: box}}}
+show_list:
+  name: Show list
+  description: Show a structured list.
+  fields:
+    title: {name: Title, required: true, selector: {text: {}}}
+    items: {name: Items, required: true, selector: {object: {}}}
+    timeout_seconds: {name: Timeout, selector: {number: {min: 0, max: 86400, mode: box}}}
+show_timer:
+  name: Show timer
+  description: Start the configured Home Assistant timer and show it.
+  fields:
+    name: {name: Name, required: true, selector: {text: {}}}
+    duration_seconds: {name: Duration, required: true, selector: {number: {min: 1, max: 86400, mode: box}}}
+clear_display:
+  name: Clear display
+  description: Return the main view to idle without cancelling the timer.

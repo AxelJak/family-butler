@@ -1,0 +1,12 @@
+{
+  "title": "Köksdisplay",
+  "config": {
+    "step": {
+      "user": {"title": "Anslut köksdisplayen", "description": "Anslut till displayen på ditt lokala nätverk.", "data": {"base_url": "Displayens bas-URL", "token": "Bearer-token", "timer_entity": "Timer-hjälpare"}},
+      "reconfigure": {"title": "Konfigurera om köksdisplayen", "data": {"base_url": "Displayens bas-URL", "token": "Bearer-token", "timer_entity": "Timer-hjälpare"}}
+    },
+    "error": {"cannot_connect": "Det gick inte att ansluta", "invalid_auth": "Bearer-token är ogiltig", "invalid_url": "Ange en HTTP- eller HTTPS-URL", "invalid_timer": "Välj en befintlig timer-hjälpare"},
+    "abort": {"single_instance_allowed": "Endast en köksdisplay kan konfigureras", "reconfigure_successful": "Konfigurationen uppdaterades"}
+  },
+  "entity": {"binary_sensor": {"availability": {"name": "Tillgänglighet"}}}
+}
