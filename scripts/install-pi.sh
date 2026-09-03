@@ -73,7 +73,10 @@ sed "s|@NODE_BINARY@|$NODE_BINARY|" "$REPOSITORY_DIR/deploy/kitchen-display.serv
 install -o root -g root -m 0644 "$UNIT_FILE" /etc/systemd/system/kitchen-display.service
 rm -f "$UNIT_FILE"
 
-PREVIOUS_RELEASE=$(readlink -f /opt/kitchen-display/current 2>/dev/null || true)
+PREVIOUS_RELEASE=
+if [ -L /opt/kitchen-display/current ]; then
+  PREVIOUS_RELEASE=$(readlink -f /opt/kitchen-display/current)
+fi
 NEW_LINK=/opt/kitchen-display/.current-$$
 ln -s "$RELEASE_DIR" "$NEW_LINK"
 mv -Tf "$NEW_LINK" /opt/kitchen-display/current
