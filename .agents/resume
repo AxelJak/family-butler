@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Toolchains and dependencies are restored from the setup snapshot. This project
+# needs no authentication, database repair, or other per-wake work.

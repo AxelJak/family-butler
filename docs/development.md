@@ -29,6 +29,24 @@ npm start
 During development, `npm run dev` rebuilds the client once and watches the
 server TypeScript. Re-run `npm run build:client` after client changes.
 
+## Amp orbs
+
+`.agents/setup` prepares Node.js 22 and Python 3.13 (matching CI), installs the
+locked npm dependencies and Python CI tools in `.venv`, and builds the app.
+Amp snapshots this environment so fresh orbs can reuse it without reinstalling
+dependencies. Setup is idempotent when a snapshot needs refreshing; resume does
+no installation because there are no backing services or authentication to repair.
+
+New login shells in this checkout automatically select these toolchains, so
+`npm test`, `pytest`, and `ruff` work directly. To refresh the environment manually,
+run `.agents/setup`, then start a new login shell. Python test dependencies follow
+CI's unpinned packages and resolve to releases compatible with Python 3.13.
+
+No API token is baked into the shared snapshot. To run the app, generate and export
+a development token using the commands above, then run `npm start`. For a persistent
+orb preview, use `amp orb service start display --command 'npm start' --portal`
+and share its returned portal URL rather than a loopback URL.
+
 ## API examples
 
 Reads and SSE are intentionally public to clients on the trusted LAN:

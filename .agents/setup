@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+echo "Preparing CI toolchains (Node.js 22, Python 3.13)"
+SECONDS=0
+node_prefix="$HOME/.local/share/family-butler/node"
+if [[ ! -x "$node_prefix/node_modules/.bin/node" ]] ||
+  [[ "$("$node_prefix/node_modules/.bin/node" -p 'process.versions.node.split(".")[0]')" != 22 ]]; then
+  npm install --prefix "$node_prefix" --no-audit --no-fund node@22
+fi
+export PATH="$node_prefix/node_modules/.bin:$PATH"
+uv python install 3.13
+if [[ ! -x .venv/bin/python ]]; then
+  uv venv --python 3.13 .venv
+fi
+export VIRTUAL_ENV="$repo_root/.venv"
+export PATH="$VIRTUAL_ENV/bin:$PATH"
+echo "Toolchains ready in ${SECONDS}s"
+
+# Login shells also power Amp and supervised services. Scope this environment to
+# this checkout so other repositories keep their own toolchains.
+profile_marker="# family-butler orb toolchains"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<EOF
+
+$profile_marker
+if [[ "\$PWD" == "$repo_root" || "\$PWD" == "$repo_root/"* ]]; then
+  export VIRTUAL_ENV="$repo_root/.venv"
+  export PATH="\$VIRTUAL_ENV/bin:$node_prefix/node_modules/.bin:\$PATH"
+fi
+EOF
+fi
+
+echo "Installing locked npm dependencies"
+SECONDS=0
+npm ci --prefer-offline --no-audit --no-fund
+echo "npm dependencies ready in ${SECONDS}s"
+
+echo "Installing Python CI dependencies"
+SECONDS=0
+uv pip install --python .venv/bin/python pytest-homeassistant-custom-component ruff
+echo "Python dependencies ready in ${SECONDS}s"
+
+echo "Building the display server and client"
+SECONDS=0
+npm run build
+echo "Build ready in ${SECONDS}s"
