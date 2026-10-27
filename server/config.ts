@@ -7,6 +7,7 @@ export interface ServerConfig {
   stateFile: string;
   publicDir: string;
   logLevel: string;
+  allowedOrigins?: string[];
 }
 
 function parsePort(value: string | undefined): number {
@@ -32,5 +33,21 @@ export function loadConfig(environment = process.env): ServerConfig {
     stateFile: resolve(environment.STATE_FILE ?? "data/state.json"),
     publicDir: resolve(environment.PUBLIC_DIR ?? "dist/client"),
     logLevel: environment.LOG_LEVEL ?? "info",
+    allowedOrigins: (environment.ALLOWED_ORIGINS ?? "")
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean)
+      .map((origin) => {
+        const parsed = new URL(origin);
+        if (
+          !["http:", "https:"].includes(parsed.protocol) ||
+          parsed.origin !== origin
+        ) {
+          throw new Error(
+            "ALLOWED_ORIGINS must contain comma-separated HTTP origins without paths",
+          );
+        }
+        return origin;
+      }),
   };
 }

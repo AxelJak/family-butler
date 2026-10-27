@@ -112,4 +112,4 @@ fi
 
 echo "Kitchen Display $RELEASE_ID is running."
 echo "Open http://kitchen-display.local after configuring the hostname and Avahi."
-echo "Read the Home Assistant token with: sudo sed -n 's/^KITCHEN_DISPLAY_API_TOKEN=//p' /etc/kitchen-display/environment"
+echo "Read the MCP control token with: sudo sed -n 's/^KITCHEN_DISPLAY_API_TOKEN=//p' /etc/kitchen-display/environment"

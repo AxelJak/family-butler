@@ -1,30 +1,31 @@
-# Family Butler — Kitchen Display
+# Family Butler — MCP Kitchen Display
 
-A lightweight kitchen display for Home Assistant. Home Assistant and its LLM
-choose **what** to show through structured tools; a Raspberry Pi Zero 2 W stores
-the state and decides **how** it appears on an old iPad Air.
+A kitchen display controlled exclusively by an LLM through MCP. An assistant
+chooses content through structured tools; a Raspberry Pi stores state, runs
+local timers, and serves a readable display to an old iPad Air.
 
-V1 includes:
+- Authenticated, stateless MCP over Streamable HTTP at `/mcp`.
+- Text, recipes, checkable lists, recipe-step focus, and hands-free pagination.
+- Up to eight independent local timers with pause, resume, and completion alerts.
+- Persistent content, expiries, timer deadlines, and retry receipts.
+- Stable content/item/timer IDs for follow-up requests.
+- Browser acknowledgements report actual page, viewport, and visibility.
+- Framework-free, ES5-compatible Swedish display; no touch controls or control token.
+- Hardened, unprivileged systemd deployment.
 
-- a Fastify/TypeScript server with a validated bearer-authenticated API;
-- persistent idle, text, recipe, list, and timer states;
-- full-state Server-Sent Events with reconnect-safe clients;
-- a framework-free, ES5-compatible Swedish web UI;
-- a Home Assistant custom integration with actions and LLM tools;
-- an unprivileged, hardened systemd deployment.
-
-The browser never receives the write token, and neither automations nor an LLM
-can provide HTML, CSS, JavaScript, or arbitrary UI.
+The assistant runs elsewhere. Voice, conversation, and external capabilities
+belong to its host. The display accepts plain structured data and owns layout;
+it never executes model-provided HTML, CSS, or JavaScript.
 
 ## Documentation
 
+- [MCP connection, tools, and assistant guidance](docs/mcp.md)
 - [Product and technical specification](docs/spec.md)
-- [Local development and API](docs/development.md)
+- [Local development](docs/development.md)
 - [Raspberry Pi installation and updates](docs/pi-deployment.md)
-- [Home Assistant, OpenRouter, and ElevenLabs setup](docs/home-assistant.md)
 - [Physical acceptance checklist](docs/acceptance.md)
 
-## Quick verification
+## Verify
 
 ```sh
 npm ci
@@ -33,6 +34,6 @@ npm test
 npm run build
 ```
 
-The Home Assistant Python checks use Python 3.13 and
-`pytest-homeassistant-custom-component`; CI runs them against the current Home
-Assistant test package.
+Node.js 20 or newer is required; CI and the setup script use Node.js 22.
+Existing V1 state is migrated on first startup with an unchanged `.v1-backup`
+file retained beside it. See the specification before rolling back.

@@ -1,18 +1,32 @@
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import {
-  type DisplayCommand,
+  PersistedStateSchema as LegacySchema,
+  type PersistedState as LegacyState,
+} from "./legacy.js";
+import {
   PersistedStateSchema,
+  ToolSchemas,
+  type Content,
+  type DisplaySnapshot,
   type PersistedState,
-  type TimerSync,
+  type Receipt,
+  type ToolCommand,
+  type ToolName,
 } from "./schemas.js";
 
-const TEXT_DEFAULT_TIMEOUT_SECONDS = 120;
-const TIMER_ALERT_SECONDS = 60;
-const MAX_TIMER_DELAY = 2_147_483_647;
+FormatRegistry.Set(
+  "date-time",
+  (value) =>
+    /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(
+      value,
+    ) && Number.isFinite(Date.parse(value)),
+);
 
 interface StateLogger {
   info(details: object, message: string): void;
@@ -21,7 +35,10 @@ interface StateLogger {
 }
 
 export class StateValidationError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly code = "invalid_request",
+  ) {
     super(message);
     this.name = "StateValidationError";
   }
@@ -31,364 +48,548 @@ export interface StateStoreOptions {
   stateFile: string;
   logger: StateLogger;
   now?: () => Date;
-  onChange?: (snapshot: KitchenDisplayProtocol.DisplaySnapshot) => void;
+  onChange?: (snapshot: DisplaySnapshot) => void;
+  getLayout?: (
+    snapshot: DisplaySnapshot,
+    contentId: string,
+  ) => { page: number; pageCount: number } | undefined;
+}
+
+export interface OperationResult {
+  snapshot: DisplaySnapshot;
+  operation?: {
+    operationId: string;
+    revision: number;
+    replayed: boolean;
+    contentId?: string;
+    timerId?: string;
+  };
 }
 
 function defaultState(now: Date): PersistedState {
   return {
-    schemaVersion: 1,
-    baseView: { type: "idle" },
-    timerFocused: false,
+    schemaVersion: 2,
+    revision: 0,
+    timers: [],
+    receipts: [],
     updatedAt: now.toISOString(),
   };
 }
 
-function validTimestamp(value: string): boolean {
-  return Number.isFinite(Date.parse(value));
+// Object key order is irrelevant to an operation's identity; array order is meaningful.
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
-function assertTimestamp(value: string, field: string): void {
-  if (!validTimestamp(value)) {
-    throw new StateValidationError(`${field} must be a valid ISO 8601 timestamp`);
-  }
+function legacyContent(view: LegacyState["baseView"]): Content | undefined {
+  if (view.type === "idle") return undefined;
+  return {
+    id: randomUUID(),
+    page: 1,
+    view:
+      view.type === "list"
+        ? {
+            ...view,
+            items: view.items.map((text) => ({
+              id: randomUUID(),
+              text,
+              checked: false,
+            })),
+          }
+        : view,
+  };
 }
 
-function displayViewFromCommand(
-  command: Exclude<DisplayCommand, { type: "idle" } | { type: "timer" }>,
-): KitchenDisplayProtocol.TextView |
-  KitchenDisplayProtocol.RecipeView |
-  KitchenDisplayProtocol.ListView {
-  switch (command.type) {
-    case "text":
-      return {
-        type: "text",
-        ...(command.title === undefined ? {} : { title: command.title }),
-        text: command.text,
-      };
-    case "recipe":
-      return {
-        type: "recipe",
-        title: command.title,
-        ingredients: [...command.ingredients],
-        steps: [...command.steps],
-        ...(command.cookingTimeMinutes === undefined
-          ? {}
-          : { cookingTimeMinutes: command.cookingTimeMinutes }),
-      };
-    case "list":
-      return {
-        type: "list",
-        title: command.title,
-        items: [...command.items],
-      };
+function migrate(legacy: LegacyState, now: Date): PersistedState {
+  const next = defaultState(now);
+  const base = legacyContent(legacy.baseView);
+  if (base) next.base = base;
+  if (legacy.temporary) {
+    const temporary = legacyContent(legacy.temporary.view)!;
+    next.temporary = { ...temporary, expiresAt: legacy.temporary.expiresAt };
   }
-}
-
-function timerFromSync(
-  timer: TimerSync | Extract<DisplayCommand, { type: "timer" }>,
-): KitchenDisplayProtocol.TimerState {
-  switch (timer.status) {
-    case "active":
-      assertTimestamp(timer.endsAt, "endsAt");
-      return { name: timer.name, status: "active", endsAt: timer.endsAt };
-    case "paused":
-      return {
-        name: timer.name,
-        status: "paused",
-        remainingSeconds: timer.remainingSeconds,
-      };
-    case "finished":
-      return { name: timer.name, status: "finished" };
+  if (legacy.activeTimer) {
+    const id = randomUUID();
+    const timer = legacy.activeTimer;
+    next.timers = [
+      timer.status === "finished"
+        ? {
+            id,
+            name: timer.name,
+            status: "finished",
+            endedAt: now.toISOString(),
+            alertUntil: legacy.timerAlertUntil ?? now.toISOString(),
+          }
+        : { ...timer, id },
+    ];
+    if (legacy.timerFocused && timer.status !== "finished")
+      next.focusedTimerId = id;
   }
-}
-
-function timeoutForCommand(
-  command: Exclude<DisplayCommand, { type: "idle" } | { type: "timer" }>,
-): number {
-  if (command.timeoutSeconds !== undefined) {
-    return command.timeoutSeconds;
-  }
-  return command.type === "text" ? TEXT_DEFAULT_TIMEOUT_SECONDS : 0;
-}
-
-function stateHasValidDates(state: PersistedState): boolean {
-  if (!validTimestamp(state.updatedAt)) {
-    return false;
-  }
-  if (state.temporary && !validTimestamp(state.temporary.expiresAt)) {
-    return false;
-  }
-  if (state.timerAlertUntil && !validTimestamp(state.timerAlertUntil)) {
-    return false;
-  }
-  return !(
-    state.activeTimer?.status === "active" &&
-    !validTimestamp(state.activeTimer.endsAt)
-  );
+  return next;
 }
 
 export class DisplayStateStore {
   readonly #stateFile: string;
   readonly #logger: StateLogger;
   readonly #now: () => Date;
-  readonly #onChange: (
-    snapshot: KitchenDisplayProtocol.DisplaySnapshot,
-  ) => void;
+  readonly #onChange: (snapshot: DisplaySnapshot) => void;
+  readonly #getLayout: StateStoreOptions["getLayout"];
   #state: PersistedState;
   #operation: Promise<void> = Promise.resolve();
   #expiryTimer: NodeJS.Timeout | undefined;
+  #closed = false;
 
   constructor(options: StateStoreOptions) {
     this.#stateFile = options.stateFile;
     this.#logger = options.logger;
     this.#now = options.now ?? (() => new Date());
     this.#onChange = options.onChange ?? (() => undefined);
+    this.#getLayout = options.getLayout;
     this.#state = defaultState(this.#now());
   }
 
   async initialize(): Promise<void> {
     await mkdir(dirname(this.#stateFile), { recursive: true });
-
+    let raw: string;
     try {
-      const stored = JSON.parse(await readFile(this.#stateFile, "utf8")) as unknown;
-      if (
-        !Value.Check(PersistedStateSchema, stored) ||
-        !stateHasValidDates(stored)
-      ) {
-        throw new Error("saved state does not match schema version 1");
-      }
-      this.#state = stored;
-      const normalized = this.#normalizedState(this.#state, this.#now());
-      if (normalized !== this.#state) {
-        this.#state = normalized;
-        await this.#persist(this.#state);
-      }
-      this.#logger.info(
-        { stateType: this.snapshot().view.type },
-        "restored display state",
-      );
+      raw = await readFile(this.#stateFile, "utf8");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        const corruptPath = `${this.#stateFile}.corrupt-${this.#now()
-          .toISOString()
-          .replaceAll(":", "-")}`;
-        try {
-          await rename(this.#stateFile, corruptPath);
-        } catch (renameError) {
-          this.#logger.error(
-            { error: renameError instanceof Error ? renameError.message : "unknown" },
-            "could not preserve corrupt state file",
-          );
-        }
-        this.#logger.warn(
-          { reason: error instanceof Error ? error.message : "unknown" },
-          "saved state was corrupt; starting idle",
-        );
-      }
-      this.#state = defaultState(this.#now());
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await this.#persist(this.#state);
+      return;
     }
-
+    let stored: unknown;
+    let legacy = false;
+    try {
+      stored = JSON.parse(raw) as unknown;
+      if (Value.Check(LegacySchema, stored)) {
+        stored = migrate(stored, this.#now());
+        legacy = true;
+      }
+      if (!Value.Check(PersistedStateSchema, stored))
+        throw new Error("invalid saved state");
+      this.#validateState(stored);
+    } catch {
+      await rename(this.#stateFile, `${this.#stateFile}.corrupt-${Date.now()}`);
+      this.#logger.warn(
+        {},
+        "saved state was corrupt; preserved it and started idle",
+      );
+      await this.#persist(this.#state);
+      return;
+    }
+    if (legacy) {
+      // Never overwrite a prior V1 backup or discard a valid state on an I/O failure.
+      await writeFile(`${this.#stateFile}.v1-backup`, raw, {
+        flag: "wx",
+        mode: 0o600,
+      }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "EEXIST") throw error;
+      });
+    }
+    this.#state = stored as PersistedState;
+    const normalized = this.#normalizedState(this.#state, this.#now());
+    await this.#persist(normalized);
+    this.#state = normalized;
     this.#scheduleExpiry();
+    this.#logger.info(
+      { revision: this.#state.revision },
+      "restored display state",
+    );
   }
 
-  snapshot(): KitchenDisplayProtocol.DisplaySnapshot {
-    const serverTime = this.#now().toISOString();
-    const view = this.#effectiveView();
-    const temporaryVisible =
-      view.type !== "timer" && this.#state.temporary?.view === view;
-
-    return {
-      schemaVersion: 1,
-      view,
-      ...(this.#state.activeTimer === undefined
-        ? {}
-        : { activeTimer: this.#state.activeTimer }),
-      updatedAt: this.#state.updatedAt,
-      ...(temporaryVisible && this.#state.temporary
-        ? { expiresAt: this.#state.temporary.expiresAt }
+  snapshot(): DisplaySnapshot {
+    const state = this.#state;
+    const content = state.temporary ?? state.base;
+    // The effective view must depend only on the committed revision. A wall-clock
+    // check here could change the view before a lifecycle write has succeeded.
+    const alert = state.timers.find(
+      (timer) =>
+        timer.status === "finished" &&
+        Date.parse(timer.alertUntil) > Date.parse(state.updatedAt),
+    );
+    const focused =
+      alert ?? state.timers.find((timer) => timer.id === state.focusedTimerId);
+    return structuredClone({
+      schemaVersion: 2,
+      revision: state.revision,
+      view: focused
+        ? { type: "timer", timerId: focused.id }
+        : content
+          ? { type: content.view.type, contentId: content.id }
+          : { type: "idle" },
+      ...(content ? { content } : {}),
+      ...(state.temporary && state.base
+        ? { backgroundContent: state.base }
         : {}),
-      serverTime,
-    };
+      timers: state.timers,
+      updatedAt: state.updatedAt,
+      serverTime: this.#now().toISOString(),
+    });
   }
 
-  async applyDisplayCommand(
-    command: DisplayCommand,
-  ): Promise<KitchenDisplayProtocol.DisplaySnapshot> {
+  async execute(name: string, args: unknown): Promise<OperationResult> {
+    if (!Object.hasOwn(ToolSchemas, name))
+      throw new StateValidationError("Unknown tool", "unknown_tool");
+    const schema = ToolSchemas[name as ToolName];
+    if (!Value.Check(schema, args)) {
+      const errors = [...Value.Errors(schema, args)]
+        .slice(0, 6)
+        .map((error) => `${error.path || "/"}: ${error.message}`)
+        .join("; ");
+      throw new StateValidationError(errors);
+    }
+    const command = { name, args } as ToolCommand;
     return this.#enqueue(async () => {
-      const now = this.#now();
-      let next = this.#normalizedState(this.#state, now);
+      const normalized = this.#normalizedState(this.#state, this.#now());
+      if (normalized !== this.#state) await this.#commit(normalized);
+      if (command.name === "get_display_state")
+        return { snapshot: this.snapshot() };
+      const fingerprint = createHash("sha256")
+        .update(canonical(command))
+        .digest("hex");
+      const previous = this.#state.receipts.find(
+        (receipt) => receipt.operationId === command.args.operationId,
+      );
+      if (previous) {
+        if (previous.fingerprint !== fingerprint)
+          throw new StateValidationError(
+            "operationId was already used with different arguments; use a new operationId",
+            "operation_conflict",
+          );
+        return this.#result(previous, true);
+      }
+      const next = structuredClone(this.#state);
+      const receipt: Receipt = {
+        operationId: command.args.operationId,
+        fingerprint,
+        revision: next.revision + 1,
+      };
+      this.#apply(next, command, receipt);
+      next.receipts = [...next.receipts, receipt].slice(-256);
+      next.revision = receipt.revision;
+      next.updatedAt = this.#now().toISOString();
+      await this.#commit(next);
+      return this.#result(receipt, false);
+    });
+  }
 
-      if (command.type === "timer") {
-        next = {
-          ...next,
-          activeTimer: timerFromSync(command),
-          timerFocused: true,
-          updatedAt: now.toISOString(),
+  #result(receipt: Receipt, replayed: boolean): OperationResult {
+    const { fingerprint: _fingerprint, ...operation } = receipt;
+    return { snapshot: this.snapshot(), operation: { ...operation, replayed } };
+  }
+
+  #content(state: PersistedState, id: string): Content {
+    const content = [state.base, state.temporary].find(
+      (item) => item?.id === id,
+    );
+    if (!content)
+      throw new StateValidationError(
+        "Content no longer exists; read get_display_state",
+        "content_not_found",
+      );
+    return content;
+  }
+
+  #apply(
+    state: PersistedState,
+    command: Exclude<ToolCommand, { name: "get_display_state" }>,
+    receipt: Receipt,
+  ): void {
+    const now = this.#now();
+    if (
+      command.name === "show_text" ||
+      command.name === "show_recipe" ||
+      command.name === "show_list"
+    ) {
+      const {
+        operationId: _operationId,
+        timeoutSeconds,
+        ...fields
+      } = command.args;
+      let content: Content;
+      if (command.name === "show_list") {
+        content = {
+          id: randomUUID(),
+          page: 1,
+          view: {
+            type: "list",
+            title: command.args.title,
+            items: command.args.items.map((text) => ({
+              id: randomUUID(),
+              text,
+              checked: false,
+            })),
+          },
         };
-        delete next.timerAlertUntil;
-      } else if (command.type === "idle") {
-        next = {
-          ...next,
-          baseView: { type: "idle" },
-          timerFocused: false,
-          updatedAt: now.toISOString(),
+      } else if (command.name === "show_text") {
+        content = {
+          id: randomUUID(),
+          page: 1,
+          view: {
+            type: "text",
+            text: command.args.text,
+            ...(command.args.title === undefined
+              ? {}
+              : { title: command.args.title }),
+          },
         };
-        delete next.temporary;
       } else {
-        const view = displayViewFromCommand(command);
-        const timeoutSeconds = timeoutForCommand(command);
-        next = {
-          ...next,
-          timerFocused: false,
-          updatedAt: now.toISOString(),
+        content = {
+          id: randomUUID(),
+          page: 1,
+          view: { type: "recipe", ...fields } as Extract<
+            Content["view"],
+            { type: "recipe" }
+          >,
         };
-        if (timeoutSeconds === 0) {
-          next.baseView = view;
-          delete next.temporary;
-        } else {
-          next.temporary = {
-            view,
-            expiresAt: new Date(
-              now.getTime() + timeoutSeconds * 1_000,
+      }
+      const timeout =
+        timeoutSeconds ?? (command.name === "show_text" ? 120 : 0);
+      if (timeout > 0) {
+        content.expiresAt = new Date(
+          now.getTime() + timeout * 1000,
+        ).toISOString();
+        state.temporary = content;
+      } else {
+        state.base = content;
+        delete state.temporary;
+      }
+      delete state.focusedTimerId;
+      receipt.contentId = content.id;
+      return;
+    }
+    if (command.name === "clear_display") {
+      delete state.base;
+      delete state.temporary;
+      delete state.focusedTimerId;
+      return;
+    }
+    if ("contentId" in command.args) {
+      const content = this.#content(state, command.args.contentId);
+      receipt.contentId = content.id;
+      switch (command.name) {
+        case "update_text":
+          if (content.view.type !== "text")
+            throw new StateValidationError("Content must be text");
+          content.view.text = command.args.text;
+          if (command.args.title !== undefined)
+            content.view.title = command.args.title;
+          content.page = 1;
+          break;
+        case "update_list_item": {
+          if (content.view.type !== "list")
+            throw new StateValidationError("Content must be a list");
+          const item = content.view.items.find(
+            (item) => item.id === command.args.itemId,
+          );
+          if (!item)
+            throw new StateValidationError(
+              "List item no longer exists",
+              "item_not_found",
+            );
+          item.checked = command.args.checked;
+          if (command.args.text !== undefined) item.text = command.args.text;
+          break;
+        }
+        case "set_recipe_step":
+          if (content.view.type !== "recipe")
+            throw new StateValidationError("Content must be a recipe");
+          if (command.args.step > content.view.steps.length)
+            throw new StateValidationError(
+              "Step exceeds the number of recipe steps",
+            );
+          if (command.args.step === 0) delete content.focusedStep;
+          else content.focusedStep = command.args.step;
+          content.page = 1;
+          break;
+        case "set_page":
+          content.page = command.args.page;
+          break;
+        case "next_page": {
+          const layout = this.#getLayout?.(this.snapshot(), content.id);
+          if (!layout)
+            throw new StateValidationError(
+              "Wait for the current content to be acknowledged by a visible renderer, or use set_page",
+              "renderer_not_ready",
+            );
+          content.page = Math.max(
+            1,
+            Math.min(
+              layout.pageCount,
+              layout.page + (command.args.direction === "backward" ? -1 : 1),
+            ),
+          );
+          break;
+        }
+      }
+      delete state.focusedTimerId;
+      return;
+    }
+    if (command.name === "start_timer") {
+      if (state.timers.length >= 8)
+        throw new StateValidationError(
+          "At most 8 timers; cancel a timer before starting another",
+          "timer_limit",
+        );
+      const id = randomUUID();
+      state.timers.push({
+        id,
+        name: command.args.name,
+        status: "active",
+        endsAt: new Date(
+          now.getTime() + command.args.durationSeconds * 1000,
+        ).toISOString(),
+      });
+      if (command.args.focus) state.focusedTimerId = id;
+      receipt.timerId = id;
+      return;
+    }
+    if (!("timerId" in command.args)) return;
+    const id = command.args.timerId;
+    const timer = state.timers.find((timer) => timer.id === id);
+    if (!timer)
+      throw new StateValidationError(
+        "Timer no longer exists; read get_display_state",
+        "timer_not_found",
+      );
+    receipt.timerId = id;
+    switch (command.name) {
+      case "pause_timer":
+        if (timer.status === "finished")
+          throw new StateValidationError("A finished timer cannot be paused");
+        if (timer.status === "active")
+          state.timers[state.timers.indexOf(timer)] = {
+            id,
+            name: timer.name,
+            status: "paused",
+            remainingSeconds: Math.max(
+              0,
+              (Date.parse(timer.endsAt) - now.getTime()) / 1000,
+            ),
+          };
+        break;
+      case "resume_timer":
+        if (timer.status === "finished")
+          throw new StateValidationError(
+            "A finished timer cannot be resumed; start a new timer",
+          );
+        if (timer.status === "paused")
+          state.timers[state.timers.indexOf(timer)] = {
+            id,
+            name: timer.name,
+            status: "active",
+            endsAt: new Date(
+              now.getTime() + timer.remainingSeconds * 1000,
             ).toISOString(),
           };
-        }
-      }
-
-      return this.#commit(next);
-    });
-  }
-
-  async clearDisplay(): Promise<KitchenDisplayProtocol.DisplaySnapshot> {
-    return this.applyDisplayCommand({ schemaVersion: 1, type: "idle" });
-  }
-
-  async synchronizeTimer(
-    timer: TimerSync,
-  ): Promise<KitchenDisplayProtocol.DisplaySnapshot> {
-    return this.#enqueue(async () => {
-      const now = this.#now();
-      let next = this.#normalizedState(this.#state, now);
-      const synchronizedTimer = timerFromSync(timer);
-      const alreadyFinished = next.activeTimer?.status === "finished";
-
-      next = {
-        ...next,
-        activeTimer: synchronizedTimer,
-        updatedAt: now.toISOString(),
-      };
-
-      if (synchronizedTimer.status === "finished") {
-        next.timerFocused = true;
-        if (!alreadyFinished || !next.timerAlertUntil) {
-          next.timerAlertUntil = new Date(
-            now.getTime() + TIMER_ALERT_SECONDS * 1_000,
-          ).toISOString();
-        }
-      } else {
-        delete next.timerAlertUntil;
-      }
-
-      return this.#commit(next);
-    });
-  }
-
-  async cancelTimer(): Promise<KitchenDisplayProtocol.DisplaySnapshot> {
-    return this.#enqueue(async () => {
-      const now = this.#now();
-      const next = {
-        ...this.#normalizedState(this.#state, now),
-        timerFocused: false,
-        updatedAt: now.toISOString(),
-      };
-      delete next.activeTimer;
-      delete next.timerAlertUntil;
-      return this.#commit(next);
-    });
-  }
-
-  async close(): Promise<void> {
-    if (this.#expiryTimer) {
-      clearTimeout(this.#expiryTimer);
-      this.#expiryTimer = undefined;
+        break;
+      case "cancel_timer":
+        state.timers = state.timers.filter((timer) => timer.id !== id);
+        if (state.focusedTimerId === id) delete state.focusedTimerId;
+        break;
+      case "focus_timer":
+        state.focusedTimerId = id;
+        break;
     }
-    await this.#operation;
   }
 
-  #effectiveView(): KitchenDisplayProtocol.DisplayState {
-    if (this.#state.timerFocused && this.#state.activeTimer) {
-      return { type: "timer" };
+  #validateState(state: PersistedState): void {
+    const contentIds = [state.base, state.temporary]
+      .filter((item) => item !== undefined)
+      .map((item) => item.id);
+    if (
+      new Set(contentIds).size !== contentIds.length ||
+      (state.temporary && !state.temporary.expiresAt)
+    )
+      throw new Error("invalid contents");
+    for (const content of [state.base, state.temporary]) {
+      if (!content) continue;
+      if (
+        content.focusedStep &&
+        (content.view.type !== "recipe" ||
+          content.focusedStep > content.view.steps.length)
+      )
+        throw new Error("invalid focus");
+      if (
+        content.view.type === "list" &&
+        new Set(content.view.items.map((item) => item.id)).size !==
+          content.view.items.length
+      )
+        throw new Error("duplicate items");
     }
-    return this.#state.temporary?.view ?? this.#state.baseView;
+    if (
+      new Set(state.timers.map((timer) => timer.id)).size !==
+      state.timers.length
+    )
+      throw new Error("duplicate timers");
+    if (
+      new Set(state.receipts.map((receipt) => receipt.operationId)).size !==
+        state.receipts.length ||
+      state.receipts.some((receipt) => receipt.revision > state.revision)
+    )
+      throw new Error("invalid receipts");
   }
 
   #normalizedState(state: PersistedState, now: Date): PersistedState {
-    const nowMs = now.getTime();
-    let next = state;
-
-    if (state.temporary && Date.parse(state.temporary.expiresAt) <= nowMs) {
-      next = { ...next };
+    const next = structuredClone(state);
+    const time = now.getTime();
+    let changed = false;
+    if (next.temporary && Date.parse(next.temporary.expiresAt!) <= time) {
       delete next.temporary;
+      changed = true;
     }
-
-    if (next.activeTimer?.status === "active") {
-      const activeTimer = next.activeTimer;
-      const endsAt = Date.parse(activeTimer.endsAt);
-      if (endsAt <= nowMs) {
-        const alertUntil = endsAt + TIMER_ALERT_SECONDS * 1_000;
-        next = { ...next };
-        if (alertUntil <= nowMs) {
-          delete next.activeTimer;
-          delete next.timerAlertUntil;
-          next.timerFocused = false;
-        } else {
-          next.activeTimer = {
-            name: activeTimer.name,
-            status: "finished",
-          };
-          next.timerAlertUntil = new Date(alertUntil).toISOString();
-          next.timerFocused = true;
-        }
+    next.timers = next.timers.map((timer) => {
+      if (timer.status !== "active" || Date.parse(timer.endsAt) > time)
+        return timer;
+      changed = true;
+      if (next.focusedTimerId === timer.id) delete next.focusedTimerId;
+      return {
+        id: timer.id,
+        name: timer.name,
+        status: "finished",
+        endedAt: timer.endsAt,
+        alertUntil: new Date(Date.parse(timer.endsAt) + 60_000).toISOString(),
+      };
+    });
+    if (next.focusedTimerId) {
+      const focused = next.timers.find(
+        (timer) => timer.id === next.focusedTimerId,
+      );
+      if (!focused) {
+        delete next.focusedTimerId;
+        changed = true;
       }
-    } else if (
-      next.activeTimer?.status === "finished" &&
-      next.timerAlertUntil &&
-      Date.parse(next.timerAlertUntil) <= nowMs
-    ) {
-      next = { ...next };
-      delete next.activeTimer;
-      delete next.timerAlertUntil;
-      next.timerFocused = false;
     }
-
-    if (!next.activeTimer && next.timerFocused) {
-      next = { ...next, timerFocused: false };
-    }
-
-    if (next !== state) {
-      next.updatedAt = now.toISOString();
-    }
+    // An alert's end changes the effective view even though the finished timer is retained.
+    if (
+      state.timers.some(
+        (timer) =>
+          timer.status === "finished" &&
+          Date.parse(timer.alertUntil) <= time &&
+          Date.parse(timer.alertUntil) > Date.parse(state.updatedAt),
+      )
+    )
+      changed = true;
+    if (!changed) return state;
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
     return next;
   }
 
-  async #commit(
-    next: PersistedState,
-  ): Promise<KitchenDisplayProtocol.DisplaySnapshot> {
-    const previous = this.#state;
+  async #commit(next: PersistedState): Promise<void> {
+    // Publish only after durable acceptance. Failed writes leave the previous state visible.
+    await this.#persist(next);
     this.#state = next;
-    try {
-      await this.#persist(next);
-    } catch (error) {
-      this.#state = previous;
-      this.#scheduleExpiry();
-      throw error;
-    }
-
     this.#scheduleExpiry();
-    const snapshot = this.snapshot();
-    this.#onChange(snapshot);
-    return snapshot;
+    this.#onChange(this.snapshot());
   }
 
   async #persist(state: PersistedState): Promise<void> {
@@ -400,54 +601,56 @@ export class DisplayStateStore {
     await rename(temporaryFile, this.#stateFile);
   }
 
-  #scheduleExpiry(): void {
-    if (this.#expiryTimer) {
-      clearTimeout(this.#expiryTimer);
-      this.#expiryTimer = undefined;
-    }
-
-    const candidates: number[] = [];
-    if (this.#state.temporary) {
-      candidates.push(Date.parse(this.#state.temporary.expiresAt));
-    }
-    if (this.#state.activeTimer?.status === "active") {
-      candidates.push(Date.parse(this.#state.activeTimer.endsAt));
-    }
-    if (this.#state.timerAlertUntil) {
-      candidates.push(Date.parse(this.#state.timerAlertUntil));
-    }
-    if (candidates.length === 0) {
-      return;
-    }
-
-    const delay = Math.min(
-      MAX_TIMER_DELAY,
-      Math.max(0, Math.min(...candidates) - this.#now().getTime()),
+  #scheduleExpiry(retry = false): void {
+    if (this.#expiryTimer) clearTimeout(this.#expiryTimer);
+    this.#expiryTimer = undefined;
+    if (this.#closed) return;
+    const now = this.#now().getTime();
+    const deadlines = this.#state.timers.flatMap((timer) =>
+      timer.status === "active"
+        ? [Date.parse(timer.endsAt)]
+        : timer.status === "finished" &&
+            Date.parse(timer.alertUntil) > Date.parse(this.#state.updatedAt)
+          ? [Date.parse(timer.alertUntil)]
+          : [],
     );
-    this.#expiryTimer = setTimeout(() => {
-      void this.#enqueue(async () => {
-        const normalized = this.#normalizedState(this.#state, this.#now());
-        if (normalized === this.#state) {
-          this.#scheduleExpiry();
-          return;
-        }
-        await this.#commit(normalized);
-      }).catch((error: unknown) => {
-        this.#logger.error(
-          { error: error instanceof Error ? error.message : "unknown" },
-          "could not expire display state",
-        );
-      });
-    }, delay);
+    if (this.#state.temporary)
+      deadlines.push(Date.parse(this.#state.temporary.expiresAt!));
+    if (!deadlines.length) return;
+    this.#expiryTimer = setTimeout(
+      () => {
+        void this.#enqueue(async () => {
+          const next = this.#normalizedState(this.#state, this.#now());
+          if (next !== this.#state) await this.#commit(next);
+          else this.#scheduleExpiry();
+        }).catch(() => {
+          this.#logger.error(
+            {},
+            "could not persist display lifecycle; retrying",
+          );
+          this.#scheduleExpiry(true);
+        });
+      },
+      retry
+        ? 1000
+        : Math.min(2_147_483_647, Math.max(0, Math.min(...deadlines) - now)),
+    );
     this.#expiryTimer.unref();
   }
 
   #enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.#operation.then(operation, operation);
+    if (this.#closed) return Promise.reject(new Error("Display is closing"));
+    const result = this.#operation.then(operation);
     this.#operation = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+    if (this.#expiryTimer) clearTimeout(this.#expiryTimer);
+    await this.#operation;
   }
 }

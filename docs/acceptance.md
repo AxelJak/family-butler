@@ -1,56 +1,29 @@
 # Physical acceptance checklist
 
-Automated tests cover the protocol, validation, persistence, lifecycle, and SSE
-transport. Complete this checklist on the real Pi, Home Assistant instance, and
-first-generation iPad Air before treating V1 as deployed.
+Automated tests cannot establish Safari 12 behavior or physical readability.
+Run these checks on the Pi and actual iPad before relying on the appliance.
 
-## Pi and network
+- [ ] Boot the Pi and verify systemd starts the service without a logged-in user.
+- [ ] Open the display on the iPad and configure Home Screen, Auto-Lock Never, and Guided Access.
+- [ ] Connect your assistant's HTTP MCP client using its securely stored bearer header.
+- [ ] Discover tools and ask “Visa en inköpslista med mjölk och pasta.”
+- [ ] Verify `get_display_state` reports a visible acknowledgement and actual page count.
+- [ ] Ask to mark milk as bought; verify only the correct stable item ID changes.
+- [ ] Display long text/list/recipe content. Navigate every page through the assistant without touching or scrolling. Verify every part of the content is reachable and readable.
+- [ ] Rotate the iPad and verify pages are recalculated and accurately acknowledged.
+- [ ] Display a recipe and request the next cooking step, then restore the overview.
+- [ ] Display temporary text over a recipe; verify expiry restores its prior page/step.
+- [ ] Start two named timers, pause/resume one, and verify the other keeps running.
+- [ ] Retry the exact start_timer operation ID and arguments; verify no duplicate or restarted countdown.
+- [ ] Disconnect the assistant and verify timers finish with a visual alert for 60 seconds and restore prior content.
+- [ ] Restart the Pi during running and paused timers; verify remaining duration and IDs survive.
+- [ ] Restart after a timer's deadline and alert window; verify finished state without a new stale alert.
+- [ ] Cancel a finished timer and verify its banner disappears without clearing other timers/content.
+- [ ] Hide Safari; verify it is not treated as a visible acknowledgement. Return and verify fresh reporting.
+- [ ] Interrupt Wi-Fi; verify last content remains and a connection warning appears. Reconnect and verify current content returns without stale reporting credentials.
+- [ ] Reject missing/wrong control tokens, foreign browser origins, invalid tool fields, and oversized requests.
+- [ ] Verify the browser holds no control token and has no touch controls.
+- [ ] If upgrading V1, verify automatic state conversion and the preserved V1 backup before proceeding.
 
-- [ ] `http://kitchen-display.local/api/health` responds from the home LAN.
-- [ ] The API is unreachable from outside the LAN.
-- [ ] An unauthorized POST returns 401 and does not change the display.
-- [ ] Invalid and extra payload fields return 400 and do not change state.
-- [ ] The service returns after a Pi reboot and after a forced process restart.
-- [ ] Persistent recipe/list content survives a service restart.
-- [ ] Temporary content that expires while offline is not restored.
-
-## iPad
-
-Before continuous use, inspect the old iPad and stop if its battery is swollen
-or the enclosure is separating.
-
-1. Join the trusted Wi-Fi and open `http://kitchen-display.local` in Safari.
-2. Add the page to the Home Screen.
-3. Set Auto-Lock to Never while it is used as the display.
-4. Enable Guided Access if the display should remain locked to the web app.
-5. Keep it landscape, use a safe charger, and choose a comfortable brightness.
-
-Verify:
-
-- [ ] Idle clock/date are correct, legible, and shown in Swedish.
-- [ ] Text is readable from the intended viewing distance.
-- [ ] Recipe columns work in landscape and manually scroll when long.
-- [ ] Lists remain legible and manually scroll when long.
-- [ ] Portrait fallback is usable.
-- [ ] An active timer banner does not hide important content.
-- [ ] Focused and finished timer views fit without clipping.
-- [ ] Disconnecting Wi-Fi keeps the last useful view and shows a small warning.
-- [ ] Reconnecting updates the screen without a manual reload.
-- [ ] The page remains stable during an overnight run.
-
-## Home Assistant and voice
-
-- [ ] All five Kitchen Display actions work from Developer tools.
-- [ ] `clear_display` does not cancel an active HA timer.
-- [ ] Pausing, resuming, restarting, cancelling, and finishing the selected HA
-      timer are reflected on the display.
-- [ ] The OpenRouter agent has only Assist and Kitchen Display APIs selected.
-- [ ] A Swedish light command controls the intended exposed light.
-- [ ] Short answers do not unnecessarily use the display.
-- [ ] Explicit show requests always use the display.
-- [ ] Recipe requests produce structured ingredients and steps.
-- [ ] Voice and text pass the same model acceptance prompts.
-- [ ] ElevenLabs quota/network failure leaves text input usable.
-
-Record any readability or model-tool failures before UI or prompt tuning. Test
-one change at a time against this same checklist.
+Completion alerts are visual; audible alarms are not guaranteed. Assistant
+hosts supply their own conversation, voice, and external capabilities.

@@ -1,27 +1,13 @@
-import { timingSafeEqual } from "node:crypto";
-
 import fastifyStatic from "@fastify/static";
-import Fastify, {
-  type FastifyInstance,
-  type FastifyRequest,
-} from "fastify";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 
 import type { ServerConfig } from "./config.js";
 import { DisplayEvents } from "./events.js";
-import {
-  DisplayCommandSchema,
-  type DisplayCommand,
-  TimerSyncSchema,
-  type TimerSync,
-} from "./schemas.js";
+import { createMcpServer } from "./mcp.js";
+import { Renderers, tokenMatches } from "./renderers.js";
+import { RendererReportSchema, type RendererReport } from "./schemas.js";
 import { DisplayStateStore, StateValidationError } from "./state-store.js";
-
-class UnauthorizedError extends Error {
-  constructor() {
-    super("A valid bearer token is required");
-    this.name = "UnauthorizedError";
-  }
-}
 
 export interface BuildAppOptions {
   config: ServerConfig;
@@ -29,49 +15,8 @@ export interface BuildAppOptions {
 }
 
 function bearerToken(request: FastifyRequest): string | undefined {
-  const authorization = request.headers.authorization;
-  if (!authorization?.startsWith("Bearer ")) {
-    return undefined;
-  }
-  return authorization.slice("Bearer ".length);
-}
-
-function tokenMatches(actual: string | undefined, expected: string): boolean {
-  if (actual === undefined) {
-    return false;
-  }
-  const actualBuffer = Buffer.from(actual);
-  const expectedBuffer = Buffer.from(expected);
-  return (
-    actualBuffer.length === expectedBuffer.length &&
-    timingSafeEqual(actualBuffer, expectedBuffer)
-  );
-}
-
-function errorCode(error: Error): string {
-  if (error instanceof UnauthorizedError) {
-    return "unauthorized";
-  }
-  if (error instanceof StateValidationError || "validation" in error) {
-    return "invalid_request";
-  }
-  if ("code" in error && error.code === "FST_ERR_CTP_BODY_TOO_LARGE") {
-    return "payload_too_large";
-  }
-  return "internal_error";
-}
-
-function errorStatus(error: Error): number {
-  if (error instanceof UnauthorizedError) {
-    return 401;
-  }
-  if (error instanceof StateValidationError || "validation" in error) {
-    return 400;
-  }
-  if ("code" in error && error.code === "FST_ERR_CTP_BODY_TOO_LARGE") {
-    return 413;
-  }
-  return 500;
+  const header = request.headers.authorization;
+  return header?.startsWith("Bearer ") ? header.slice(7) : undefined;
 }
 
 export async function buildApp(
@@ -80,138 +25,215 @@ export async function buildApp(
   const { config } = options;
   const app = Fastify({
     logger: options.logger === false ? false : { level: config.logLevel },
-    bodyLimit: 64 * 1_024,
-    ajv: { customOptions: { removeAdditional: false } },
+    bodyLimit: 64 * 1024,
+    ajv: {
+      customOptions: {
+        removeAdditional: false,
+        coerceTypes: false,
+        useDefaults: false,
+      },
+    },
     forceCloseConnections: true,
   });
   const events = new DisplayEvents();
+  const renderers = new Renderers();
   const state = new DisplayStateStore({
     stateFile: config.stateFile,
     logger: app.log,
     onChange: (snapshot) => events.publish(snapshot),
+    getLayout: (snapshot, contentId) => renderers.layout(snapshot, contentId),
   });
   await state.initialize();
 
-  async function requireWriteAccess(request: FastifyRequest): Promise<void> {
+  function requireControl(request: FastifyRequest): void {
     if (!tokenMatches(bearerToken(request), config.apiToken)) {
-      throw new UnauthorizedError();
+      throw new StateValidationError(
+        "A valid control bearer token is required",
+        "unauthorized",
+      );
+    }
+  }
+
+  function requireAllowedOrigin(request: FastifyRequest): void {
+    const origin = request.headers.origin;
+    if (origin === undefined) return; // Non-browser MCP clients often omit Origin.
+    const ownOrigin = `${request.protocol}://${request.headers.host}`;
+    if (origin !== ownOrigin && !config.allowedOrigins?.includes(origin)) {
+      throw new StateValidationError(
+        "Origin is not allowed",
+        "forbidden_origin",
+      );
     }
   }
 
   app.setErrorHandler((error, request, reply) => {
-    const handledError =
-      error instanceof Error ? error : new Error("Unknown request error");
-    const status = errorStatus(handledError);
-    if (status >= 500) {
-      request.log.error(
-        { error: handledError.message, requestId: request.id },
-        "request failed",
-      );
-    }
-    void reply.status(status).send({
-      error: {
-        code: errorCode(handledError),
-        message:
-          status >= 500
-            ? "The display server could not complete the request"
-            : handledError.message,
-        requestId: request.id,
-      },
-    });
+    const handled = error instanceof Error ? error : new Error("Unknown error");
+    const code =
+      handled instanceof StateValidationError
+        ? handled.code
+        : "validation" in handled ||
+            ("statusCode" in handled && handled.statusCode === 400)
+          ? "invalid_request"
+          : "code" in handled && handled.code === "FST_ERR_CTP_BODY_TOO_LARGE"
+            ? "payload_too_large"
+            : "internal_error";
+    const status =
+      code === "unauthorized"
+        ? 401
+        : code === "forbidden_origin"
+          ? 403
+          : code === "stale_report"
+            ? 409
+            : code === "payload_too_large"
+              ? 413
+              : code === "internal_error"
+                ? 500
+                : 400;
+    if (status >= 500)
+      request.log.error({ requestId: request.id }, "request failed");
+    void reply
+      .status(status)
+      .send({
+        error: {
+          code,
+          message:
+            status >= 500
+              ? "The display server could not complete the request"
+              : handled.message,
+          requestId: request.id,
+        },
+      });
   });
 
-  app.addHook("onRequest", async (_request, reply) => {
+  app.addHook("onRequest", async (request, reply) => {
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Referrer-Policy", "no-referrer");
     reply.header("X-Frame-Options", "DENY");
+    reply.header("Cache-Control", "no-store");
     reply.header(
       "Content-Security-Policy",
-      "default-src 'self'; connect-src 'self'; img-src 'self' data:; " +
-        "style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'",
+      "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     );
+    if (request.url.startsWith("/mcp") || request.url.startsWith("/api/"))
+      requireAllowedOrigin(request);
+    if (request.url === "/mcp" && request.headers.origin) {
+      reply.header("Access-Control-Allow-Origin", request.headers.origin);
+      reply.header("Vary", "Origin");
+      reply.header(
+        "Access-Control-Allow-Methods",
+        "POST, GET, DELETE, OPTIONS",
+      );
+      reply.header(
+        "Access-Control-Allow-Headers",
+        "Authorization, Content-Type, Accept, MCP-Protocol-Version",
+      );
+    }
   });
 
-  app.get(
-    "/api/health",
-    {
-      preHandler: async (request) => {
-        if (request.headers.authorization !== undefined) {
-          await requireWriteAccess(request);
-        }
-      },
-    },
-    async () => ({
+  // Browser preflight carries no bearer token; the origin check still applies.
+  app.options("/mcp", async (_request, reply) => reply.code(204).send());
+
+  app.get("/api/health", async (request) => {
+    if (request.headers.authorization !== undefined) requireControl(request);
+    return {
       status: "ok",
-      schemaVersion: 1,
+      schemaVersion: 2,
       uptimeSeconds: Math.floor(process.uptime()),
       displayState: state.snapshot().view.type,
       connectedClients: events.listenerCount,
-    }),
-  );
-
+    };
+  });
   app.get("/api/display", async () => state.snapshot());
 
-  app.post(
-    "/api/display",
-    {
-      schema: { body: DisplayCommandSchema },
-      preHandler: requireWriteAccess,
+  app.route({
+    method: ["POST", "GET", "DELETE"],
+    url: "/mcp",
+    preHandler: async (request) => requireControl(request),
+    handler: async (request, reply) => {
+      if (request.method !== "POST")
+        return reply
+          .header("Allow", "POST")
+          .code(405)
+          .send({ error: "Use POST for stateless MCP" });
+      const server = createMcpServer(state, renderers);
+      const transport = new StreamableHTTPServerTransport({
+        enableJsonResponse: true,
+      });
+      await server.connect(transport);
+      reply.hijack();
+      for (const [key, value] of Object.entries(reply.getHeaders())) {
+        if (value !== undefined) reply.raw.setHeader(key, value);
+      }
+      reply.raw.once("close", () => {
+        void server.close().catch(() => undefined);
+      });
+      try {
+        await transport.handleRequest(request.raw, reply.raw, request.body);
+      } catch {
+        if (!reply.raw.headersSent) {
+          reply.raw.writeHead(500, { "Content-Type": "application/json" });
+          reply.raw.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32603, message: "MCP request failed" },
+            }),
+          );
+        }
+      }
     },
-    async (request) =>
-      state.applyDisplayCommand(request.body as DisplayCommand),
-  );
+  });
 
-  app.delete(
-    "/api/display",
-    { preHandler: requireWriteAccess },
-    async () => state.clearDisplay(),
-  );
-
-  app.put(
-    "/api/timer",
+  app.post<{ Params: { rendererId: string }; Body: RendererReport }>(
+    "/api/renderers/:rendererId",
     {
-      schema: { body: TimerSyncSchema },
-      preHandler: requireWriteAccess,
+      schema: { body: RendererReportSchema },
     },
-    async (request) => state.synchronizeTimer(request.body as TimerSync),
+    async (request) => {
+      renderers.report(
+        request.params.rendererId,
+        bearerToken(request),
+        request.body,
+        state.snapshot(),
+      );
+      return { accepted: true };
+    },
   );
 
-  app.delete(
-    "/api/timer",
-    { preHandler: requireWriteAccess },
-    async () => state.cancelTimer(),
-  );
-
-  app.get("/api/events", async (request, reply) => {
+  app.get("/api/events", async (_request, reply) => {
+    const credentials = renderers.connect();
     reply.hijack();
+    for (const [key, value] of Object.entries(reply.getHeaders())) {
+      if (value !== undefined) reply.raw.setHeader(key, value);
+    }
     reply.raw.writeHead(200, {
-      "Cache-Control": "no-cache, no-transform",
+      "Cache-Control": "no-store",
       Connection: "keep-alive",
       "Content-Type": "text/event-stream; charset=utf-8",
       "X-Accel-Buffering": "no",
     });
     reply.raw.flushHeaders();
-    reply.raw.write("retry: 2000\n\n");
-
-    const send = (snapshot: KitchenDisplayProtocol.DisplaySnapshot): void => {
-      if (!reply.raw.writableEnded) {
+    reply.raw.write(
+      `retry: 2000\nevent: renderer\ndata: ${JSON.stringify(credentials)}\n\n`,
+    );
+    const send = (
+      snapshot: ReturnType<DisplayStateStore["snapshot"]>,
+    ): void => {
+      if (!reply.raw.writableEnded)
         reply.raw.write(
-          `id: ${snapshot.updatedAt}\nevent: display\ndata: ${JSON.stringify(snapshot)}\n\n`,
+          `id: ${snapshot.revision}\nevent: display\ndata: ${JSON.stringify(snapshot)}\n\n`,
         );
-      }
     };
     send(state.snapshot());
     const unsubscribe = events.subscribe(send);
     const heartbeat = setInterval(() => {
-      if (!reply.raw.writableEnded) {
-        reply.raw.write(": heartbeat\n\n");
-      }
+      if (!reply.raw.writableEnded) reply.raw.write(": heartbeat\n\n");
     }, 15_000);
     heartbeat.unref();
-
     reply.raw.once("close", () => {
       clearInterval(heartbeat);
       unsubscribe();
+      renderers.disconnect(credentials.rendererId);
     });
   });
 
@@ -221,21 +243,11 @@ export async function buildApp(
     etag: true,
     lastModified: true,
   });
-
-  app.setNotFoundHandler((request, reply) => {
-    if (request.url.startsWith("/api/")) {
-      void reply.status(404).send({
-        error: {
-          code: "not_found",
-          message: "API endpoint not found",
-          requestId: request.id,
-        },
-      });
-      return;
-    }
-    void reply.status(404).type("text/plain").send("Not found");
+  app.setNotFoundHandler((_request, reply) => {
+    void reply
+      .status(404)
+      .send({ error: { code: "not_found", message: "Endpoint not found" } });
   });
-
   app.addHook("onClose", async () => state.close());
   return app;
 }

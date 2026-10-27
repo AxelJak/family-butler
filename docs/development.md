@@ -1,11 +1,7 @@
-# Local development and API
+# Local development
 
-## Prerequisites
-
-- Node.js 20 or newer
-- npm
-
-Install and verify:
+Node.js 20 or newer and npm are required. CI and `.agents/setup` use Node.js 22.
+The service needs no backing services or model credentials.
 
 ```sh
 npm ci
@@ -14,7 +10,7 @@ npm test
 npm run build
 ```
 
-Generate a local token and start the server:
+Generate a development control token locally and start the server:
 
 ```sh
 KITCHEN_DISPLAY_API_TOKEN=$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')
@@ -26,91 +22,41 @@ export PUBLIC_DIR=./dist/client
 npm start
 ```
 
-During development, `npm run dev` rebuilds the client once and watches the
-server TypeScript. Re-run `npm run build:client` after client changes.
+Open `http://127.0.0.1:3000` for the display. Configure an MCP client with
+`http://127.0.0.1:3000/mcp` and the bearer header described in [mcp.md](mcp.md).
+`npm run dev` builds the client once and watches the server; rebuild the client
+after client changes. `.agents/setup` prepares the Node toolchain, installs
+locked dependencies, and builds the project. `.agents/resume` needs no setup.
 
-## Amp orbs
+## Configuration
 
-`.agents/setup` prepares Node.js 22 and Python 3.13 (matching CI), installs the
-locked npm dependencies and Python CI tools in `.venv`, and builds the app.
-Amp snapshots this environment so fresh orbs can reuse it without reinstalling
-dependencies. Setup is idempotent when a snapshot needs refreshing; resume does
-no installation because there are no backing services or authentication to repair.
+| Variable                    | Default           | Meaning                                                               |
+| --------------------------- | ----------------- | --------------------------------------------------------------------- |
+| `KITCHEN_DISPLAY_API_TOKEN` | required          | Control bearer token, at least 32 characters                          |
+| `HOST`                      | `127.0.0.1`       | Listen address; use `0.0.0.0` for the Pi's LAN                        |
+| `PORT`                      | `3000`            | Listen port                                                           |
+| `STATE_FILE`                | `data/state.json` | Atomically persisted state and retry receipts                         |
+| `PUBLIC_DIR`                | `dist/client`     | Built static renderer                                                 |
+| `LOG_LEVEL`                 | `info`            | Fastify/Pino log level                                                |
+| `ALLOWED_ORIGINS`           | empty             | Additional comma-separated browser origins, no trailing slashes/paths |
 
-New login shells in this checkout automatically select these toolchains, so
-`npm test`, `pytest`, and `ruff` work directly. To refresh the environment manually,
-run `.agents/setup`, then start a new login shell. Python test dependencies follow
-CI's unpinned packages and resolve to releases compatible with Python 3.13.
+Keep tokens out of repository files, logs, URLs, and chat. Reads and renderer
+reporting credentials are accessible to trusted LAN devices. Do not expose the
+service publicly.
 
-No API token is baked into the shared snapshot. To run the app, generate and export
-a development token using the commands above, then run `npm start`. For a persistent
-orb preview, use `amp orb service start display --command 'npm start' --portal`
-and share its returned portal URL rather than a loopback URL.
-
-## API examples
-
-Reads and SSE are intentionally public to clients on the trusted LAN:
+## Internal renderer endpoints
 
 ```sh
 curl http://127.0.0.1:3000/api/health
 curl http://127.0.0.1:3000/api/display
-curl -N http://127.0.0.1:3000/api/events
 ```
 
-Supplying an authorization header to the health endpoint also validates the
-token. This is how the Home Assistant config flow catches a wrong token.
+`/api/events` supplies SSE `renderer` credentials followed by full `display`
+snapshots. The renderer posts acknowledgements to `/api/renderers/:rendererId`
+using that connection's ephemeral bearer token. The token confers report-only
+access. Opening this stream manually reveals reporting credentials, so do not
+paste its raw output into logs or chat.
 
-Show temporary text (120 seconds by default):
-
-```sh
-curl -X POST http://127.0.0.1:3000/api/display \
-  -H "Authorization: Bearer $KITCHEN_DISPLAY_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"schemaVersion":1,"type":"text","title":"Svar","text":"Maten är klar."}'
-```
-
-Show a persistent recipe:
-
-```sh
-curl -X POST http://127.0.0.1:3000/api/display \
-  -H "Authorization: Bearer $KITCHEN_DISPLAY_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "schemaVersion": 1,
-    "type": "recipe",
-    "title": "Pasta med parmesan",
-    "ingredients": ["Pasta", "Parmesan", "Grädde"],
-    "steps": ["Koka pastan", "Blanda såsen", "Vänd ihop"],
-    "cookingTimeMinutes": 20
-  }'
-```
-
-Show a persistent list and then clear it:
-
-```sh
-curl -X POST http://127.0.0.1:3000/api/display \
-  -H "Authorization: Bearer $KITCHEN_DISPLAY_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"type":"list","title":"Handla","items":["Mjölk","Pasta"],"timeoutSeconds":0}'
-
-curl -X DELETE http://127.0.0.1:3000/api/display \
-  -H "Authorization: Bearer $KITCHEN_DISPLAY_API_TOKEN"
-```
-
-Use `PUT /api/timer` only to synchronize the selected Home Assistant timer.
-Normal users and automations should call the integration's `show_timer` action
-instead, so Home Assistant remains authoritative.
-
-## Configuration
-
-| Environment variable | Default | Purpose |
-| --- | --- | --- |
-| `KITCHEN_DISPLAY_API_TOKEN` | required | Write token, at least 32 characters |
-| `HOST` | `127.0.0.1` | Listen address |
-| `PORT` | `3000` | Listen port |
-| `STATE_FILE` | `data/state.json` | Atomic persisted state |
-| `PUBLIC_DIR` | `dist/client` | Built static client |
-| `LOG_LEVEL` | `info` | Fastify/Pino log level |
-
-Do not put real tokens in the repository or expose this HTTP service outside
-the trusted home LAN.
+Control is exclusively through MCP tools. There are no REST mutation routes.
+Tests use the official MCP client against the actual HTTP transport and fake
+time for durable timer/content lifecycle checks.

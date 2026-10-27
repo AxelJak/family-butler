@@ -1,256 +1,256 @@
 import { type Static, Type } from "@sinclair/typebox";
 
-const TITLE_MAX_LENGTH = 120;
-const CONTENT_MAX_LENGTH = 4_000;
-const ITEM_MAX_LENGTH = 500;
-const ITEM_MAX_COUNT = 50;
-const TIMEOUT_MAX_SECONDS = 86_400;
-
-const SchemaVersionProperty = Type.Optional(Type.Literal(1));
-const TitleSchema = Type.String({ minLength: 1, maxLength: TITLE_MAX_LENGTH });
-const ItemSchema = Type.String({ minLength: 1, maxLength: ITEM_MAX_LENGTH });
-const TimeoutSchema = Type.Optional(
-  Type.Union([
-    Type.Literal(0),
-    Type.Integer({ minimum: 10, maximum: TIMEOUT_MAX_SECONDS }),
-  ]),
+const objectOptions = { additionalProperties: false };
+export const IdSchema = Type.String({ minLength: 1, maxLength: 128 });
+const Title = Type.String({ minLength: 1, maxLength: 120 });
+const ItemText = Type.String({ minLength: 1, maxLength: 500 });
+const Items = Type.Array(ItemText, { minItems: 1, maxItems: 50 });
+const Text = Type.String({ minLength: 1, maxLength: 4_000 });
+const DateTime = Type.String({ format: "date-time" });
+const Page = Type.Integer({ minimum: 1, maximum: 100_000 });
+const Timeout = Type.Optional(
+  Type.Union([Type.Literal(0), Type.Integer({ minimum: 10, maximum: 86_400 })]),
 );
 
-export const IdleViewSchema = Type.Object(
-  { type: Type.Literal("idle") },
-  { additionalProperties: false },
-);
-
-export const TextViewSchema = Type.Object(
+export const ListItemSchema = Type.Object(
   {
-    type: Type.Literal("text"),
-    title: Type.Optional(TitleSchema),
-    text: Type.String({ minLength: 1, maxLength: CONTENT_MAX_LENGTH }),
+    id: IdSchema,
+    text: ItemText,
+    checked: Type.Boolean(),
   },
-  { additionalProperties: false },
+  objectOptions,
 );
 
-export const RecipeViewSchema = Type.Object(
-  {
-    type: Type.Literal("recipe"),
-    title: TitleSchema,
-    ingredients: Type.Array(ItemSchema, {
-      minItems: 1,
-      maxItems: ITEM_MAX_COUNT,
-    }),
-    steps: Type.Array(ItemSchema, { minItems: 1, maxItems: ITEM_MAX_COUNT }),
-    cookingTimeMinutes: Type.Optional(
-      Type.Integer({ minimum: 1, maximum: 1_440 }),
-    ),
-  },
-  { additionalProperties: false },
-);
-
-export const ListViewSchema = Type.Object(
-  {
-    type: Type.Literal("list"),
-    title: TitleSchema,
-    items: Type.Array(ItemSchema, { minItems: 1, maxItems: ITEM_MAX_COUNT }),
-  },
-  { additionalProperties: false },
-);
-
-export const TimerViewSchema = Type.Object(
-  { type: Type.Literal("timer") },
-  { additionalProperties: false },
-);
-
-export const BaseViewSchema = Type.Union([
-  IdleViewSchema,
-  TextViewSchema,
-  RecipeViewSchema,
-  ListViewSchema,
+export const ContentViewSchema = Type.Union([
+  Type.Object(
+    { type: Type.Literal("text"), title: Type.Optional(Title), text: Text },
+    objectOptions,
+  ),
+  Type.Object(
+    {
+      type: Type.Literal("recipe"),
+      title: Title,
+      ingredients: Items,
+      steps: Items,
+      cookingTimeMinutes: Type.Optional(
+        Type.Integer({ minimum: 1, maximum: 1440 }),
+      ),
+    },
+    objectOptions,
+  ),
+  Type.Object(
+    {
+      type: Type.Literal("list"),
+      title: Title,
+      items: Type.Array(ListItemSchema, { minItems: 1, maxItems: 50 }),
+    },
+    objectOptions,
+  ),
 ]);
 
-export const DisplayViewSchema = Type.Union([
-  IdleViewSchema,
-  TextViewSchema,
-  RecipeViewSchema,
-  ListViewSchema,
-  TimerViewSchema,
+export const ContentSchema = Type.Object(
+  {
+    id: IdSchema,
+    view: ContentViewSchema,
+    page: Page,
+    focusedStep: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+    expiresAt: Type.Optional(DateTime),
+  },
+  objectOptions,
+);
+
+const TimerFields = { id: IdSchema, name: Title };
+export const TimerSchema = Type.Union([
+  Type.Object(
+    { ...TimerFields, status: Type.Literal("active"), endsAt: DateTime },
+    objectOptions,
+  ),
+  Type.Object(
+    {
+      ...TimerFields,
+      status: Type.Literal("paused"),
+      remainingSeconds: Type.Number({ minimum: 0, maximum: 86_400 }),
+    },
+    objectOptions,
+  ),
+  Type.Object(
+    {
+      ...TimerFields,
+      status: Type.Literal("finished"),
+      endedAt: DateTime,
+      alertUntil: DateTime,
+    },
+    objectOptions,
+  ),
 ]);
 
-export const ActiveTimerSchema = Type.Object(
+export const SnapshotSchema = Type.Object(
   {
-    name: TitleSchema,
-    status: Type.Literal("active"),
-    endsAt: Type.String({ minLength: 1, maxLength: 64 }),
+    schemaVersion: Type.Literal(2),
+    revision: Type.Integer({ minimum: 0 }),
+    view: Type.Union([
+      Type.Object({ type: Type.Literal("idle") }, objectOptions),
+      Type.Object(
+        {
+          type: Type.Union([
+            Type.Literal("text"),
+            Type.Literal("recipe"),
+            Type.Literal("list"),
+          ]),
+          contentId: IdSchema,
+        },
+        objectOptions,
+      ),
+      Type.Object(
+        { type: Type.Literal("timer"), timerId: IdSchema },
+        objectOptions,
+      ),
+    ]),
+    content: Type.Optional(ContentSchema),
+    backgroundContent: Type.Optional(ContentSchema),
+    timers: Type.Array(TimerSchema, { maxItems: 8 }),
+    updatedAt: DateTime,
+    serverTime: DateTime,
   },
-  { additionalProperties: false },
+  objectOptions,
 );
 
-export const PausedTimerSchema = Type.Object(
+const ReceiptSchema = Type.Object(
   {
-    name: TitleSchema,
-    status: Type.Literal("paused"),
-    remainingSeconds: Type.Integer({ minimum: 0, maximum: TIMEOUT_MAX_SECONDS }),
+    operationId: IdSchema,
+    fingerprint: Type.String(),
+    revision: Type.Integer({ minimum: 1 }),
+    contentId: Type.Optional(IdSchema),
+    timerId: Type.Optional(IdSchema),
   },
-  { additionalProperties: false },
+  objectOptions,
 );
-
-export const FinishedTimerSchema = Type.Object(
-  {
-    name: TitleSchema,
-    status: Type.Literal("finished"),
-  },
-  { additionalProperties: false },
-);
-
-export const TimerStateSchema = Type.Union([
-  ActiveTimerSchema,
-  PausedTimerSchema,
-  FinishedTimerSchema,
-]);
-
-const IdleCommandSchema = Type.Object(
-  { schemaVersion: SchemaVersionProperty, type: Type.Literal("idle") },
-  { additionalProperties: false },
-);
-
-const TextCommandSchema = Type.Object(
-  {
-    schemaVersion: SchemaVersionProperty,
-    type: Type.Literal("text"),
-    title: Type.Optional(TitleSchema),
-    text: Type.String({ minLength: 1, maxLength: CONTENT_MAX_LENGTH }),
-    timeoutSeconds: TimeoutSchema,
-  },
-  { additionalProperties: false },
-);
-
-const RecipeCommandSchema = Type.Object(
-  {
-    schemaVersion: SchemaVersionProperty,
-    type: Type.Literal("recipe"),
-    title: TitleSchema,
-    ingredients: Type.Array(ItemSchema, {
-      minItems: 1,
-      maxItems: ITEM_MAX_COUNT,
-    }),
-    steps: Type.Array(ItemSchema, { minItems: 1, maxItems: ITEM_MAX_COUNT }),
-    cookingTimeMinutes: Type.Optional(
-      Type.Integer({ minimum: 1, maximum: 1_440 }),
-    ),
-    timeoutSeconds: TimeoutSchema,
-  },
-  { additionalProperties: false },
-);
-
-const ListCommandSchema = Type.Object(
-  {
-    schemaVersion: SchemaVersionProperty,
-    type: Type.Literal("list"),
-    title: TitleSchema,
-    items: Type.Array(ItemSchema, { minItems: 1, maxItems: ITEM_MAX_COUNT }),
-    timeoutSeconds: TimeoutSchema,
-  },
-  { additionalProperties: false },
-);
-
-const TimerCommandSchema = Type.Object(
-  {
-    schemaVersion: SchemaVersionProperty,
-    type: Type.Literal("timer"),
-    name: TitleSchema,
-    status: Type.Literal("active"),
-    endsAt: Type.String({ minLength: 1, maxLength: 64 }),
-  },
-  { additionalProperties: false },
-);
-
-export const DisplayCommandSchema = Type.Union([
-  IdleCommandSchema,
-  TextCommandSchema,
-  RecipeCommandSchema,
-  ListCommandSchema,
-  TimerCommandSchema,
-]);
-
-const TimerSyncActiveSchema = Type.Object(
-  {
-    schemaVersion: SchemaVersionProperty,
-    name: TitleSchema,
-    status: Type.Literal("active"),
-    endsAt: Type.String({ minLength: 1, maxLength: 64 }),
-  },
-  { additionalProperties: false },
-);
-
-const TimerSyncPausedSchema = Type.Object(
-  {
-    schemaVersion: SchemaVersionProperty,
-    name: TitleSchema,
-    status: Type.Literal("paused"),
-    remainingSeconds: Type.Integer({ minimum: 0, maximum: TIMEOUT_MAX_SECONDS }),
-  },
-  { additionalProperties: false },
-);
-
-const TimerSyncFinishedSchema = Type.Object(
-  {
-    schemaVersion: SchemaVersionProperty,
-    name: TitleSchema,
-    status: Type.Literal("finished"),
-  },
-  { additionalProperties: false },
-);
-
-export const TimerSyncSchema = Type.Union([
-  TimerSyncActiveSchema,
-  TimerSyncPausedSchema,
-  TimerSyncFinishedSchema,
-]);
 
 export const PersistedStateSchema = Type.Object(
   {
-    schemaVersion: Type.Literal(1),
-    baseView: BaseViewSchema,
-    temporary: Type.Optional(
-      Type.Object(
-        {
-          view: Type.Union([TextViewSchema, RecipeViewSchema, ListViewSchema]),
-          expiresAt: Type.String({ minLength: 1, maxLength: 64 }),
-        },
-        { additionalProperties: false },
-      ),
-    ),
-    activeTimer: Type.Optional(TimerStateSchema),
-    timerFocused: Type.Boolean(),
-    timerAlertUntil: Type.Optional(
-      Type.String({ minLength: 1, maxLength: 64 }),
-    ),
-    updatedAt: Type.String({ minLength: 1, maxLength: 64 }),
+    schemaVersion: Type.Literal(2),
+    revision: Type.Integer({ minimum: 0 }),
+    base: Type.Optional(ContentSchema),
+    temporary: Type.Optional(ContentSchema),
+    timers: Type.Array(TimerSchema, { maxItems: 8 }),
+    focusedTimerId: Type.Optional(IdSchema),
+    receipts: Type.Array(ReceiptSchema, { maxItems: 256 }),
+    updatedAt: DateTime,
   },
-  { additionalProperties: false },
+  objectOptions,
 );
 
-export const ErrorResponseSchema = Type.Object(
+export const RendererReportSchema = Type.Object(
   {
-    error: Type.Object(
-      {
-        code: Type.String(),
-        message: Type.String(),
-        requestId: Type.String(),
-      },
-      { additionalProperties: false },
-    ),
+    revision: Type.Integer({ minimum: 0 }),
+    contentId: Type.Optional(IdSchema),
+    page: Page,
+    pageCount: Page,
+    width: Type.Integer({ minimum: 1, maximum: 16384 }),
+    height: Type.Integer({ minimum: 1, maximum: 16384 }),
+    visible: Type.Boolean(),
   },
-  { additionalProperties: false },
+  objectOptions,
 );
 
-export type DisplayCommand = Static<typeof DisplayCommandSchema>;
-export type TimerSync = Static<typeof TimerSyncSchema>;
-export type PersistedState = Static<typeof PersistedStateSchema>;
+const operation = {
+  operationId: Type.String({
+    minLength: 1,
+    maxLength: 128,
+    description:
+      "Unique ID for this action. Reuse the same ID and arguments only when retrying; retained for the latest 256 actions across restarts.",
+  }),
+};
+const contentTarget = { ...operation, contentId: IdSchema };
+const timerTarget = { ...operation, timerId: IdSchema };
 
-export const limits = {
-  titleLength: TITLE_MAX_LENGTH,
-  contentLength: CONTENT_MAX_LENGTH,
-  itemLength: ITEM_MAX_LENGTH,
-  itemCount: ITEM_MAX_COUNT,
-  timeoutSeconds: TIMEOUT_MAX_SECONDS,
-} as const;
+// These exact JSON Schemas are both advertised by MCP and enforced at execution.
+export const ToolSchemas = {
+  get_display_state: Type.Object({}, objectOptions),
+  show_text: Type.Object(
+    {
+      ...operation,
+      text: Text,
+      title: Type.Optional(Title),
+      timeoutSeconds: Timeout,
+    },
+    objectOptions,
+  ),
+  show_recipe: Type.Object(
+    {
+      ...operation,
+      title: Title,
+      ingredients: Items,
+      steps: Items,
+      cookingTimeMinutes: Type.Optional(
+        Type.Integer({ minimum: 1, maximum: 1440 }),
+      ),
+      timeoutSeconds: Timeout,
+    },
+    objectOptions,
+  ),
+  show_list: Type.Object(
+    { ...operation, title: Title, items: Items, timeoutSeconds: Timeout },
+    objectOptions,
+  ),
+  update_text: Type.Object(
+    { ...contentTarget, text: Text, title: Type.Optional(Title) },
+    objectOptions,
+  ),
+  update_list_item: Type.Object(
+    {
+      ...contentTarget,
+      itemId: IdSchema,
+      checked: Type.Boolean(),
+      text: Type.Optional(ItemText),
+    },
+    objectOptions,
+  ),
+  set_recipe_step: Type.Object(
+    {
+      ...contentTarget,
+      step: Type.Integer({
+        minimum: 0,
+        maximum: 50,
+        description: "1-based recipe step; 0 restores the overview.",
+      }),
+    },
+    objectOptions,
+  ),
+  set_page: Type.Object({ ...contentTarget, page: Page }, objectOptions),
+  next_page: Type.Object(
+    {
+      ...contentTarget,
+      direction: Type.Optional(
+        Type.Union([Type.Literal("forward"), Type.Literal("backward")]),
+      ),
+    },
+    objectOptions,
+  ),
+  clear_display: Type.Object(operation, objectOptions),
+  start_timer: Type.Object(
+    {
+      ...operation,
+      name: Title,
+      durationSeconds: Type.Integer({ minimum: 1, maximum: 86_400 }),
+      focus: Type.Optional(Type.Boolean({ default: false })),
+    },
+    objectOptions,
+  ),
+  pause_timer: Type.Object(timerTarget, objectOptions),
+  resume_timer: Type.Object(timerTarget, objectOptions),
+  cancel_timer: Type.Object(timerTarget, objectOptions),
+  focus_timer: Type.Object(timerTarget, objectOptions),
+};
+
+export type ToolName = keyof typeof ToolSchemas;
+export type ToolArguments<N extends ToolName> = Static<(typeof ToolSchemas)[N]>;
+export type ToolCommand = {
+  [N in ToolName]: { name: N; args: ToolArguments<N> };
+}[ToolName];
+export type PersistedState = Static<typeof PersistedStateSchema>;
+export type DisplaySnapshot = Static<typeof SnapshotSchema>;
+export type Content = Static<typeof ContentSchema>;
+export type Timer = Static<typeof TimerSchema>;
+export type Receipt = Static<typeof ReceiptSchema>;
+export type RendererReport = Static<typeof RendererReportSchema>;

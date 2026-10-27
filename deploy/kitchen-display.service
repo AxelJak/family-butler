@@ -1,5 +1,5 @@
 [Unit]
-Description=Kitchen Display server
+Description=Family Butler MCP display server
 Wants=network-online.target
 After=network-online.target
 

@@ -1,7 +1,7 @@
 # Raspberry Pi installation and updates
 
 Target: Raspberry Pi Zero 2 W running current Raspberry Pi OS Lite 64-bit. The
-Pi is only an HTTP/SSE server; do not install a graphical desktop or Chromium.
+Pi runs the MCP server and HTTP/SSE renderer service; do not install a graphical desktop or Chromium.
 
 ## 1. Prepare the Pi
 
@@ -55,7 +55,8 @@ The installer:
 - retains `/var/lib/kitchen-display/state.json` across updates;
 - rolls back the symlink if an update fails its health check.
 
-It never replaces an existing token. Read the token once for Home Assistant:
+It never replaces an existing token. Configure your assistant with `http://kitchen-display.local/mcp` and the control
+bearer token. Read the token locally:
 
 ```sh
 sudo sed -n 's/^KITCHEN_DISPLAY_API_TOKEN=//p' /etc/kitchen-display/environment
@@ -74,6 +75,11 @@ journalctl -u kitchen-display -n 100
 
 Open `http://kitchen-display.local` from another LAN device. Do not forward port
 80 on the router and do not expose the service through a public reverse proxy.
+
+See [MCP connection and tool usage](mcp.md) for the connection contract. The
+iPad opens `/` and needs no control token. Initial iPad setup still requires
+adding the page to the Home Screen, disabling Auto-Lock, and enabling Guided
+Access. Afterwards the assistant controls all content and pagination.
 
 ## Updating
 
@@ -99,7 +105,7 @@ sudo systemctl restart kitchen-display
 ```
 
 Only remove old release directories after a newer version has worked on the
-actual iPad and with Home Assistant.
+actual iPad and your MCP-capable assistant.
 
 ## Operations
 
@@ -111,5 +117,4 @@ sudo journalctl -u kitchen-display -f
 ```
 
 To rotate the token, edit `/etc/kitchen-display/environment`, restart the
-service, and immediately reconfigure the Kitchen Display integration in Home
-Assistant. A mismatch intentionally makes all writes fail with HTTP 401.
+service, and update the bearer token in your assistant's MCP connection settings. A mismatch makes MCP requests fail with HTTP 401.
